@@ -8,9 +8,9 @@ def jigsaw(x, patch_size: int):
     w_patch = W // patch_size
 
     patches = x.unfold(2, h_patch, h_patch).unfold(3, w_patch, w_patch)
-    
+
     patches = patches.contiguous().view(B, C, -1, h_patch, w_patch)
-    patches = patches.permute(0, 2, 1, 3, 4) # [B, N_patches, C, h, w]
+    patches = patches.permute(0, 2, 1, 3, 4)  # [B, N_patches, C, h, w]
 
     num_patches = patch_size * patch_size
     rand_indices = torch.rand(B, num_patches, device=x.device).argsort(dim=1)
