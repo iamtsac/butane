@@ -71,7 +71,6 @@ class UNetNd(torch.nn.Module):
         zero_conv: bool = True,
         attention: bool = False,
         attention_channel_idx: IntParams = [],
-        flash_attention: bool = False,
         attention_heads: int = 1,
         attention_dropout: float = 0.0,
         fusion_type: Literal["film", "adagn", "additive", "multiplicative"] = "film",
@@ -131,6 +130,7 @@ class UNetNd(torch.nn.Module):
 
         if attention:
             _attention_module, attention_channel_idx = self._setup_attention_module(
+                is_cross=False,
                 attention_heads=attention_heads,
                 attention_channel_idx=attention_channel_idx,
                 attention_dropout=attention_dropout,

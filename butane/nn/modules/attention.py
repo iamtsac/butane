@@ -18,7 +18,6 @@ class _AttentionTemplate(torch.nn.Module):
         n_heads: int = 1,
         dropout_p: float = 0.0,
         causal: bool = False,
-        flash_attention: bool = False,
         prenorm: bool = True,
         zero_out: bool = True,
     ):
@@ -33,7 +32,6 @@ class _AttentionTemplate(torch.nn.Module):
         self._is_cross = kv_input_size is not None
         self._prenorm_enabled = prenorm
         self._kv_input_size = kv_input_size if kv_input_size is not None else self._d_model
-        self._flash_attention = flash_attention
 
         self.scale_factor = math.sqrt(self.d_k)
 
@@ -82,41 +80,24 @@ class _AttentionTemplate(torch.nn.Module):
         else:
             kv_input = q_input
 
-        _q = self.query(q_input)
-        _k = self.key(kv_input)
-        _v = self.value(kv_input)
+        _q = self.query(q_input).reshape(B, L_Q, self._n_heads, self.d_k).transpose(1, 2)
+        _k = self.key(kv_input).reshape(B, L_KV, self._n_heads, self.d_k).transpose(1, 2)
+        _v = self.value(kv_input).reshape(B, L_KV, self._n_heads, self.d_k).transpose(1, 2)
 
-        if self._n_heads > 1:
-            _q = _q.reshape(B, L_Q, self._n_heads, self.d_k).transpose(1, 2)
-            _k = _k.reshape(B, L_KV, self._n_heads, self.d_k).transpose(1, 2)
-            _v = _v.reshape(B, L_KV, self._n_heads, self.d_k).transpose(1, 2)
+        attn_mask = (
+            utils.normalize_attention_mask(mask, self._n_heads, L_Q, L_KV) if mask is not None else None
+        )
+        _attention = torch.nn.functional.scaled_dot_product_attention(
+            query=_q,
+            key=_k,
+            value=_v,
+            attn_mask=attn_mask,
+            is_causal=self._causal and mask is None,
+            dropout_p=self.dropout.p if self.training else 0.0,
+            scale=1.0 / self.scale_factor,
+        )
 
-        if not self._flash_attention:
-            _qk = torch.matmul(_q, _k.transpose(-1, -2)) / self.scale_factor
-
-            if mask is not None:
-                _qk.masked_fill_(mask == 0, float("-inf"))
-
-            if self._causal:
-                causal_mask = torch.tril(torch.ones(L_Q, L_KV)).to(x1.device)
-                _qk.masked_fill_(causal_mask == 0, float("-inf"))
-
-            _attention_weights = torch.softmax(_qk, dim=-1)
-            _attention_weights = self.dropout(_attention_weights)
-            _attention = torch.matmul(_attention_weights, _v)
-        else:
-            _attention = torch.nn.functional.scaled_dot_product_attention(
-                query=_q,
-                key=_k,
-                value=_v,
-                attn_mask=mask.bool() if mask is not None else None,
-                is_causal=self._causal,
-                dropout_p=self.dropout.p if self.training else 0.0,
-                scale=1.0 / self.scale_factor,
-            )
-
-        if self._n_heads > 1:
-            _attention = _attention.transpose(1, 2).reshape(B, L_Q, self._d_model)
+        _attention = _attention.transpose(1, 2).reshape(B, L_Q, self._d_model)
 
         out = self.linear_projection(_attention.contiguous())
         if self._apply_residual:
@@ -159,7 +140,6 @@ class _SpatialAttentionTemplate(torch.nn.Module):
         prenorm: Optional[ModuleParams] = None,
         zero_out: bool = False,
         apply_residual: bool = True,
-        flash_attention: bool = False,
     ):
         super().__init__()
         assert d_model % n_heads == 0, "Features cannot be devided equally to N heads"
@@ -171,7 +151,6 @@ class _SpatialAttentionTemplate(torch.nn.Module):
         self._kv_input_size = kv_input_size if kv_input_size is not None else self._d_model
         self._apply_residual = apply_residual
         self._dropout_p = dropout_p
-        self._flash_attention = flash_attention
         _padding = kernel_size // 2
 
         self.scale_factor = math.sqrt(self.d_k)
@@ -195,8 +174,6 @@ class _SpatialAttentionTemplate(torch.nn.Module):
             else self.conv(self._d_model, self._d_model, 1, bias=bias)
         )
         # fmt: on
-
-        self.dropout = torch.nn.Dropout(self._dropout_p)
 
         self.norm_1, self.norm_2 = None, None
         if prenorm is not None:
@@ -250,24 +227,17 @@ class _SpatialAttentionTemplate(torch.nn.Module):
         k = k.transpose(1, 2).reshape(B2, L2, self._n_heads, self.d_k).transpose(1, 2)
         v = v.transpose(1, 2).reshape(B2, L2, self._n_heads, self.d_k).transpose(1, 2)
 
-        if not self._flash_attention:
-            _qk = torch.matmul(q, k.transpose(-1, -2)) / self.scale_factor
-
-            if mask is not None:
-                _qk.masked_fill_(mask == 0, float("-inf"))
-
-            _attention_weights = torch.softmax(_qk, dim=-1)
-            _attention_weights = self.dropout(_attention_weights)
-            _attention = torch.matmul(_attention_weights, v)
-        else:
-            _attention = torch.nn.functional.scaled_dot_product_attention(
-                query=q,
-                key=k,
-                value=v,
-                attn_mask=mask.bool() if mask is not None else None,
-                dropout_p=self._dropout_p if self.training else 0.0,
-                scale=1.0 / self.scale_factor,
-            )
+        attn_mask = (
+            utils.normalize_attention_mask(mask, self._n_heads, L1, L2) if mask is not None else None
+        )
+        _attention = torch.nn.functional.scaled_dot_product_attention(
+            query=q,
+            key=k,
+            value=v,
+            attn_mask=attn_mask,
+            dropout_p=self._dropout_p if self.training else 0.0,
+            scale=1.0 / self.scale_factor,
+        )
         _attention = _attention.transpose(1, 2).reshape(B1, L1, C1).transpose(1, 2)
 
         if self.N == 1:

@@ -11,6 +11,33 @@ def zero_module(module: torch.nn.Module) -> torch.nn.Module:
         p.detach().zero_()
     return module
 
+def normalize_attention_mask(
+    mask: torch.Tensor,
+    n_heads: int,
+    L_Q: int,
+    L_KV: int,
+) -> torch.Tensor:
+    """
+    Broadcasts an attention mask (1/True = attend, 0/False = masked out) to
+    (B, H, L_Q, L_KV) regardless of whether it was given as a padding mask
+    over queries (B, L_Q), a padding mask over keys/values (B, L_KV), a full
+    pairwise mask (B, L_Q, L_KV), or an already per-head mask (B, H, L_Q, L_KV).
+    """
+    if mask.dim() == 2:
+        if mask.size(-1) == L_KV:
+            mask = mask[:, None, None, :]
+        elif mask.size(-1) == L_Q:
+            mask = mask[:, None, :, None]
+        else:
+            raise ValueError(
+                f"2D attention mask has last dim {mask.size(-1)}, expected L_Q={L_Q} or L_KV={L_KV}"
+            )
+    elif mask.dim() == 3:
+        mask = mask[:, None, :, :]
+    elif mask.dim() != 4:
+        raise ValueError(f"Attention mask must be 2D, 3D or 4D, got {mask.dim()}D")
+    return mask.bool()
+
 def freeze_module(module) -> None:
     for p in module.parameters():
         p.requires_grad = False

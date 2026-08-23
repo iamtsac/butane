@@ -98,13 +98,15 @@ class TransformerBlock(torch.nn.Module):
         x: torch.Tensor,
         emb: torch.Tensor | None = None,
         ctx: torch.Tensor | None = None,
+        mask: torch.Tensor | None = None,
+        ctx_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
 
         # Vanilla Transformer/ViT/Trajectory Pathway (Zero modulation overhead)
         if not self._has_condition or emb is None:
-            x = x + self.attn(self.norm_pre_sa(x))
+            x = x + self.attn(self.norm_pre_sa(x), mask=mask)
             if self._ctx_cross_attention and ctx is not None:
-                x = x + self.cattn_context_module(self.cattn_context_norm(x), ctx)
+                x = x + self.cattn_context_module(self.cattn_context_norm(x), ctx, mask=ctx_mask)
             x = x + self.mlp(self.norm_pre_mlp(x))
             return x
 
@@ -113,11 +115,11 @@ class TransformerBlock(torch.nn.Module):
                 chunks=6, dim=1
             )
             x = x + alpha_1.unsqueeze(1) * self.attn(
-                self.norm_pre_sa(x) * (1 + gamma_1.unsqueeze(1)) + beta_1.unsqueeze(1)
+                self.norm_pre_sa(x) * (1 + gamma_1.unsqueeze(1)) + beta_1.unsqueeze(1), mask=mask
             )
 
             if self._ctx_cross_attention and ctx is not None:
-                x = x + self.cattn_context_module(self.cattn_context_norm(x), ctx)
+                x = x + self.cattn_context_module(self.cattn_context_norm(x), ctx, mask=ctx_mask)
 
             x = x + alpha_2.unsqueeze(1) * self.mlp(
                 self.norm_pre_mlp(x) * (1 + gamma_2.unsqueeze(1)) + beta_2.unsqueeze(1)
@@ -125,11 +127,11 @@ class TransformerBlock(torch.nn.Module):
         else:
             gamma_1, beta_1, gamma_2, beta_2 = self.modulation_module(emb).chunk(chunks=4, dim=1)
             x = x + self.attn(
-                self.norm_pre_sa(x) * (1 + gamma_1.unsqueeze(1)) + beta_1.unsqueeze(1)
+                self.norm_pre_sa(x) * (1 + gamma_1.unsqueeze(1)) + beta_1.unsqueeze(1), mask=mask
             )
 
             if self._ctx_cross_attention and ctx is not None:
-                x = x + self.cattn_context_module(self.cattn_context_norm(x), ctx)
+                x = x + self.cattn_context_module(self.cattn_context_norm(x), ctx, mask=ctx_mask)
 
             x = x + self.mlp(
                 self.norm_pre_mlp(x) * (1 + gamma_2.unsqueeze(1)) + beta_2.unsqueeze(1)
@@ -422,6 +424,8 @@ class _BaseTransformer(torch.nn.Module):
         t: torch.Tensor | None = None,
         ctx: torch.Tensor | None = None,
         labels: torch.Tensor | None = None,
+        mask: torch.Tensor | None = None,
+        ctx_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if self._time_dependent and t is not None:
             t = t * self._time_scaling_coeff
@@ -430,20 +434,22 @@ class _BaseTransformer(torch.nn.Module):
         emb = self._prepare_time(t=t)
         emb = self._prepare_labels(emb=emb, labels=labels, device=x.device)
         x, emb = self._prepare_conditioning(x, emb, ctx=ctx)
-        return self._forward(x, emb, ctx=ctx)
+        return self._forward(x, emb, ctx=ctx, mask=mask, ctx_mask=ctx_mask)
 
     def _forward(
         self,
         x: torch.Tensor,
         emb: torch.Tensor | None = None,
         ctx: torch.Tensor | None = None,
+        mask: torch.Tensor | None = None,
+        ctx_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         x_n_patches = x.size(1)
         if self._ctx_in_context and ctx is not None:
             x_n_patches = x_n_patches - ctx.size(1)
 
         for block in self.transformer_blocks:
-            x = block(x, emb, ctx)
+            x = block(x, emb, ctx, mask=mask, ctx_mask=ctx_mask)
 
         if self._ctx_in_context and ctx is not None:
             x = x[:, :x_n_patches]
