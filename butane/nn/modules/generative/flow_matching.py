@@ -147,7 +147,7 @@ class FlowMatching(torch.nn.Module):
                 return_func_outputs=False,
             )
             if keep_record:
-                xs[:, current_idx : current_idx + batch_n] = x[1:].to(target_device)
+                xs[:, current_idx : current_idx + batch_n] = x.to(target_device)
             else:
                 xs[current_idx : current_idx + batch_n] = x
             current_idx += batch_n
@@ -272,7 +272,7 @@ class FlowMatching(torch.nn.Module):
             x_traj, logdet_traj = traj
 
             if keep_record:
-                xs[:, current_idx : current_idx + batch_n] = x_traj[1:].to(target_device)
+                xs[:, current_idx : current_idx + batch_n] = x_traj.to(target_device)
             else:
                 xs[current_idx : current_idx + batch_n] = x_traj[-1].to(target_device)
 
@@ -364,7 +364,7 @@ class FlowMatching(torch.nn.Module):
     def edm_time_grid(n_timesteps: int, r: int = 7, reverse: bool = False):
         sigma_max = 80.0
         sigma_min = 0.002
-        t = torch.arange(0, n_timesteps, dtype=torch.float64) / (n_timesteps - 1)
+        t = torch.arange(0, n_timesteps - 1, dtype=torch.float64) / (n_timesteps - 2)
         timesteps = (sigma_max ** (1 / r) + t * (sigma_min ** (1 / r) - sigma_max ** (1 / r))) ** r
         timesteps = (timesteps / (1 + timesteps)).squeeze()
         timesteps = torch.cat([timesteps, torch.full_like(timesteps[:1], 1.0)])
