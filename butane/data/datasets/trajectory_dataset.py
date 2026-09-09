@@ -1,6 +1,6 @@
 import copy
 from collections import defaultdict
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 import numpy as np
 import torch
@@ -19,7 +19,13 @@ def _default_pad_right(input_tensor: torch.Tensor, pad_len: int) -> torch.Tensor
 
 
 class TrajectoryDataset(Dataset):
-    """Dataset class for multi-modal trajectory data supporting unequal sequence lengths."""
+    """Dataset class for multi-modal trajectory data supporting unequal sequence lengths.
+
+    Two independent ways to shorten an episode, easily confused:
+      - `trim_end` drops PIVOT INDICES. The frames stay in the tensors and still show up as
+        history/horizon context of earlier pivots; only the windows anchored ON them go away.
+      - `drop_last_frames` deletes the FRAMES themselves, per episode, before indexing.
+    """
 
     def __init__(
         self,
@@ -29,6 +35,7 @@ class TrajectoryDataset(Dataset):
         history: int = 1,
         align_start: bool = False,
         trim_end: int = 0,
+        drop_last_frames: int | Sequence[int] = 0,
         anchor_key: str | None = None,
         pad_left_fn: dict[str, Callable[[torch.Tensor, int], torch.Tensor]]
         | Callable[[torch.Tensor, int], torch.Tensor] = _default_pad_left,
@@ -47,11 +54,14 @@ class TrajectoryDataset(Dataset):
 
         assert horizon > 0, "Horizon cannot be less than 1."
         assert history > 0, "History cannot be less than 1."
+        if trim_end < 0:
+            raise ValueError(f"trim_end must be >= 0, got {trim_end}")
 
         self.horizon = horizon
         self.history = history - 1  # Number of lookback steps before pivot
         self.align_start = align_start
         self.trim_end = trim_end
+        self.drop_last_frames = drop_last_frames
         self.anchor_key = anchor_key
 
         # Storage for episodic data sequences: dict[str, list[torch.Tensor]]
@@ -60,6 +70,20 @@ class TrajectoryDataset(Dataset):
         # Ingest and separate into discrete episodes
         self._ingest_data(data)
         self._setup_padding(pad_left_fn=pad_left_fn, pad_right_fn=pad_right_fn)
+
+    @property
+    def horizon_anchor_index(self) -> int:
+        """Index WITHIN the returned horizon window that holds the pivot step ("now").
+
+        The horizon window starts at `local_t - history` when align_start is set and at
+        `local_t` otherwise (see __getitem__), so where "now" lands inside the returned
+        window is a function of align_start - not something a caller can hardcode safely.
+        Anything that re-anchors a horizon against the current pose (a relative/delta action
+        encoding, say) must read the index from here rather than recomputing `history - 1`
+        on its own: the two agree only while align_start is True, and nothing about flipping
+        that flag would otherwise announce that every such anchor had silently moved.
+        """
+        return self.history if self.align_start else 0
 
     def _slice_and_pad(
         self,
@@ -253,14 +277,30 @@ class TrajectoryDataset(Dataset):
         _sizes["targets"] = self._get_size_recursively(dummy_sample["targets"], device=self._device)
         return _sizes
 
+    def _resolve_anchor_key(self, raw_dict: dict[str, Any]) -> str:
+        """The key whose per-episode length defines how many samples an episode yields.
+
+        An anchor_key that was asked for but isn't in the data is an error, not something to
+        quietly paper over: the fallback below picks whatever happens to be first in the
+        dict, which is insertion-order-dependent and usually an unrelated modality. That
+        substitution is invisible - every key having the same length makes it look correct
+        right up until one of them doesn't, at which point the sample count silently comes
+        from the wrong stream.
+        """
+        if self.anchor_key is not None and self.anchor_key not in raw_dict:
+            raise KeyError(
+                f"anchor_key {self.anchor_key!r} is not present in the data. Available keys: "
+                f"{sorted(raw_dict.keys())}. Pass a key that exists, or pass anchor_key=None "
+                f"to deliberately anchor on the first key."
+            )
+        return self.anchor_key if self.anchor_key is not None else list(raw_dict.keys())[0]
+
     def _ingest_data(self, data: Any):
         raw_dict = data if isinstance(data, dict) else {"_internal": data}
+        if not raw_dict:
+            raise ValueError("TrajectoryDataset received no data.")
 
-        anchor = (
-            self.anchor_key
-            if (self.anchor_key and self.anchor_key in raw_dict)
-            else list(raw_dict.keys())[0]
-        )
+        anchor = self._resolve_anchor_key(raw_dict)
         first_val = raw_dict[anchor]
 
         # Parse data into discrete arrays per episode per modality
@@ -279,14 +319,31 @@ class TrajectoryDataset(Dataset):
                     )
                 self.data[key] = [torch.as_tensor(d, device=self._device) for d in val]
 
+        self._apply_drop_last_frames(n_episodes)
+
         sample_to_episode = []
         sample_to_local_t = []
+        starved = []
 
         for i in range(n_episodes):
             ep_steps = self.data[anchor][i].shape[0]
-            for t in range(ep_steps - self.trim_end):
+            n_samples = ep_steps - self.trim_end
+            if n_samples <= 0:
+                starved.append((i, ep_steps))
+                continue
+            for t in range(n_samples):
                 sample_to_episode.append(i)
                 sample_to_local_t.append(t)
+
+        if starved:
+            raise ValueError(
+                f"trim_end={self.trim_end} leaves no samples in {len(starved)} episode(s) - "
+                f"e.g. episode {starved[0][0]} has {starved[0][1]} step(s) on anchor "
+                f"{anchor!r}. trim_end drops PIVOT INDICES from the end of each episode, so "
+                f"it must stay below the shortest episode's length."
+            )
+        if not sample_to_episode:
+            raise ValueError("No samples could be built - every episode was empty.")
 
         self.sample_to_episode = torch.tensor(
             sample_to_episode, dtype=torch.long, device=self._device
@@ -294,6 +351,46 @@ class TrajectoryDataset(Dataset):
         self.sample_to_local_t = torch.tensor(
             sample_to_local_t, dtype=torch.long, device=self._device
         )
+
+    def _apply_drop_last_frames(self, n_episodes: int) -> None:
+        """Removes trailing FRAMES from every modality of each episode, in place.
+
+        Distinct from trim_end, which only drops pivot indices from the sample index and
+        leaves the frames themselves in the tensors - still reachable as horizon/history
+        context of earlier pivots. Use this one to actually delete a trailing segment (a
+        post-episode hold the robot spent frozen, a settling period), and trim_end to merely
+        stop anchoring windows there.
+
+        Accepts an int (same count for every episode) or one count per episode - a fixed
+        wall-clock tail spans a different number of frames in each episode whenever the
+        recording rate varied, so a per-episode list is the only correct form there.
+        """
+        drop = self.drop_last_frames
+        if isinstance(drop, int):
+            if drop == 0:
+                return
+            drops = [drop] * n_episodes
+        else:
+            drops = list(drop)
+            if len(drops) != n_episodes:
+                raise ValueError(
+                    f"drop_last_frames has {len(drops)} entries but there are {n_episodes} "
+                    f"episodes; pass one count per episode or a single int."
+                )
+        if any(d < 0 for d in drops):
+            raise ValueError(f"drop_last_frames entries must be >= 0, got {drops}")
+
+        for key, ep_list in self.data.items():
+            for i, d in enumerate(drops):
+                if d == 0:
+                    continue
+                ep = ep_list[i]
+                if d >= ep.shape[0]:
+                    raise ValueError(
+                        f"drop_last_frames[{i}]={d} would empty episode {i} of key {key!r} "
+                        f"(length {ep.shape[0]})."
+                    )
+                ep_list[i] = ep[: ep.shape[0] - d]
 
     def _setup_padding(self, pad_left_fn: Any, pad_right_fn: Any):
         self.pad_left_fn = {}
