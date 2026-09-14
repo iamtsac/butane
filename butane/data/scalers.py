@@ -140,6 +140,34 @@ class MinMaxScaler(Scaler):
     def __repr__(self) -> str:
         return f"MinMaxScaler(min={self.xmin.flatten()}, max={self.xmax.flatten()})"
 
+class ManualScaler(Scaler):
+    def __init__(self, scale: float | list[float] | tuple[float] = 1.0) -> None:
+        super().__init__()
+        if isinstance(scale, (list, tuple)):
+            self.register_buffer("scale", torch.empty(len(scale), dtype=torch.float32))
+        else:
+            self.register_buffer("scale", torch.empty(0, dtype=torch.float32))
+        self.dims = (1,)
+
+    def fit(
+        self,
+        X: torch.Tensor,
+        dims: int | tuple[int] = 1,
+        transforms: Callable | None = None,
+    ) -> None:
+        self.dims = dims
+        self.is_fitted = True
+
+    def _scale(self, x: torch.Tensor) -> torch.Tensor:
+        eps = 1e-12
+        return x / (self.scale + eps)
+
+    def _unscale(self, x: torch.Tensor) -> torch.Tensor:
+        eps = 1e-12
+        return x_std * (self.scale + eps)
+
+    def __repr__(self) -> str:
+        return f"ManualScaler(scale={self.scaling_factor})"
 
 class DecoupledScalerSchema(torch.nn.Module):
     """

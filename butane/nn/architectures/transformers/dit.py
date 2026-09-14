@@ -40,6 +40,7 @@ class DiT1d(_BaseTransformer):
         ctx_cross_attention: bool = False,
         cross_attention_heads: int | None = None,
         ctx_in_context: bool = False,
+        activation: torch.nn.Module | None = None,
     ) -> None:
         super().__init__(
             input_dims=input_dims, hidden_dims=hidden_dims, mlp_ratio=mlp_ratio,
@@ -52,7 +53,7 @@ class DiT1d(_BaseTransformer):
             adaLN_zero=adaLN_zero, n_classes=n_classes, class_drop_prob=class_drop_prob,
             ctx_dim=ctx_dim, ctx_patch_size=ctx_patch_size, ctx_concat=ctx_concat,
             ctx_cross_attention=ctx_cross_attention, cross_attention_heads=cross_attention_heads,
-            ctx_in_context=ctx_in_context
+            ctx_in_context=ctx_in_context, activation=activation
         )
 
 
@@ -86,6 +87,7 @@ class DiT2d(_BaseTransformer):
         ctx_cross_attention: bool = False,
         cross_attention_heads: int | None = None,
         ctx_in_context: bool = False,
+        activation: torch.nn.Module | None = None,
     ) -> None:
         super().__init__(
             input_dims=input_dims, hidden_dims=hidden_dims, mlp_ratio=mlp_ratio,
@@ -98,7 +100,7 @@ class DiT2d(_BaseTransformer):
             adaLN_zero=adaLN_zero, n_classes=n_classes, class_drop_prob=class_drop_prob,
             ctx_dim=ctx_dim, ctx_patch_size=ctx_patch_size, ctx_concat=ctx_concat,
             ctx_cross_attention=ctx_cross_attention, cross_attention_heads=cross_attention_heads,
-            ctx_in_context=ctx_in_context
+            ctx_in_context=ctx_in_context, activation=activation
         )
 
 
@@ -132,6 +134,7 @@ class DiT3d(_BaseTransformer):
         ctx_cross_attention: bool = False,
         cross_attention_heads: int | None = None,
         ctx_in_context: bool = False,
+        activation: torch.nn.Module | None = None,
     ) -> None:
         super().__init__(
             input_dims=input_dims, hidden_dims=hidden_dims, mlp_ratio=mlp_ratio,
@@ -144,5 +147,5 @@ class DiT3d(_BaseTransformer):
             adaLN_zero=adaLN_zero, n_classes=n_classes, class_drop_prob=class_drop_prob,
             ctx_dim=ctx_dim, ctx_patch_size=ctx_patch_size, ctx_concat=ctx_concat,
             ctx_cross_attention=ctx_cross_attention, cross_attention_heads=cross_attention_heads,
-            ctx_in_context=ctx_in_context
+            ctx_in_context=ctx_in_context, activation=activation
         )

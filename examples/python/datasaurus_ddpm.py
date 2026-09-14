@@ -23,7 +23,7 @@ class TimeDependentModel(torch.nn.Module):
     def __init__(self):
         super().__init__()
         self.time_proj = torch.nn.Sequential(
-            butane.nn.SinusoidalEmbeddings(2),
+            butane.nn.FourierEmbeddings(2),
             butane.nn.MLPBlock(
                 input_dims = 2,
                 output_dims = 2,

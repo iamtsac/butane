@@ -7,7 +7,8 @@ if __name__ == "__main__":
     dev = torch.device('cuda')
 
     pemb = butane.nn.SinusoidalEmbeddings(10)
-    emb = pemb(torch.rand(10, 100, 10))
+    x = torch.rand(10, 100, 10)
+    emb = x + pemb(x)
 
     attention = butane.nn.SelfAttention(10, n_heads = 5)
     print(attention)
@@ -25,7 +26,7 @@ if __name__ == "__main__":
 
 
     start_t = time.monotonic()
-    local_attention = butane.nn.SpatialSelfAttention1d(
+    local_attention = butane.nn.SpatialSelfAttention(
         64,
         n_heads = 2,
         kernel_size = 3,

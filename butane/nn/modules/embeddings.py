@@ -6,15 +6,16 @@ from ..._typedefs import *
 
 
 class LearnableEmbeddings(torch.nn.Module):
-
     def __init__(self, d_model: int, max_seq_len: Optional[int] = 10_000):
         super().__init__()
         self._embeddings = torch.nn.Embedding(max_seq_len, d_model)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        assert x.dim() >= 2, (
+            f"Positional embeddings need a sequence axis (B, L, ...), got {x.dim()}D"
+        )
         pos = torch.arange(x.size(1), dtype=torch.int32, device=self._embeddings.weight.device)
-        x = x + self._embeddings(pos)
-        return x
+        return self._embeddings(pos)
 
     @property
     def embeddings(self) -> torch.Tensor:
@@ -48,7 +49,6 @@ class FourierEmbeddings(torch.nn.Module):
         return FourierEmbeddings(d_model, max_seq_len=max_seq_len)(x)
 
 class SinusoidalEmbeddings(torch.nn.Module):
-
     def __init__(
         self,
         d_model: int,
@@ -59,16 +59,22 @@ class SinusoidalEmbeddings(torch.nn.Module):
         _pe = torch.zeros((max_seq_len, d_model))
         pos = torch.arange(max_seq_len).unsqueeze(1)
         div_term = torch.pow(10_000, torch.arange(0, d_model, 2) / d_model)
-        _pe[:, 0::2] = torch.sin(pos/div_term)
-        _pe[:, 1::2] = torch.cos(pos/div_term)
+        # An odd d_model leaves one more sin channel than cos, so each half takes the slice of
+        # div_term it actually has room for.
+        n_sin, n_cos = _pe[:, 0::2].shape[1], _pe[:, 1::2].shape[1]
+        _pe[:, 0::2] = torch.sin(pos / div_term[:n_sin])
+        _pe[:, 1::2] = torch.cos(pos / div_term[:n_cos])
         self._PE = torch.nn.Parameter(_pe, requires_grad=learnable)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if x.dim() == 1:
-            x = x[..., None]
+        assert x.dim() >= 2, (
+            f"Positional embeddings need a sequence axis (B, L, ...), got {x.dim()}D"
+        )
         seq_len = x.size(1)
-        x = x + self._PE[:seq_len, :]
-        return x
+        assert seq_len <= self._PE.size(0), (
+            f"Sequence of {seq_len} exceeds the table's {self._PE.size(0)}; raise max_seq_len."
+        )
+        return self._PE[:seq_len, :]
 
     @staticmethod
     def get_embeddings(x: torch.Tensor, d_model: int, max_seq_len: Optional[int] = 10_000) -> torch.Tensor:

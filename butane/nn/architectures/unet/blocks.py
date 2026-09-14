@@ -9,16 +9,12 @@ import torch
 from ...._typedefs import *
 from ...modules import fusions
 from ...modules.attention import (
-    SpatialCrossAttention1d,
-    SpatialCrossAttention2d,
-    SpatialSelfAttention1d,
-    SpatialSelfAttention2d,
+    SpatialCrossAttention,
+    SpatialSelfAttention,
 )
 from ...modules.conv_blocks import Conv1dBlock, Conv2dBlock, Conv3dBlock
 from ...modules.embeddings import (
     FourierEmbeddings,
-    LearnableEmbeddings,
-    SinusoidalEmbeddings,
 )
 from ...modules.mlp_block import MLPBlock
 from ...modules.residual_blocks import *

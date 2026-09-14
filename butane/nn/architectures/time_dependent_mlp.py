@@ -3,7 +3,7 @@ from functools import reduce
 import torch
 from ..._typedefs import *
 from ..modules.mlp_block import MLPBlock
-from ..modules.embeddings import SinusoidalEmbeddings, FourierEmbeddings
+from ..modules.embeddings import FourierEmbeddings
 from ..utils import utils
 from ..wrapper.x_dependent import XDependentSequential
 from ..._utils import apply_recursively

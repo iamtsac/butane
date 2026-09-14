@@ -8,14 +8,14 @@ class TestAttention(unittest.TestCase):
         self_att = butane.nn.SelfAttention(256, n_heads=1)
         self.assertIsNotNone(self_att(torch.randn(2, 3, 256)))
 
-        spatial_self_att = butane.nn.SpatialSelfAttention2d(3, n_heads=1)
+        spatial_self_att = butane.nn.SpatialSelfAttention(3, n_heads=1)
         self.assertIsNotNone(spatial_self_att(torch.randn(2, 3, 256, 256)))
 
     def test_cross_attention(self):
         cross_att = butane.nn.CrossAttention(256, n_heads=1)
         self.assertIsNotNone(cross_att(torch.randn(2, 3, 256), torch.randn(2, 3, 256)))
 
-        spatial_cross_att = butane.nn.SpatialCrossAttention2d(3, n_heads=1)
+        spatial_cross_att = butane.nn.SpatialCrossAttention(3, n_heads=1)
         self.assertIsNotNone(spatial_cross_att(torch.randn(2, 3, 256, 256), torch.randn(2, 3, 256, 256)))
 
     def test_cross_attention_mismatched_q_kv_length(self):
@@ -47,7 +47,7 @@ class TestAttention(unittest.TestCase):
         self.assertEqual(out.shape, (2, 7, 16))
 
     def test_spatial_cross_attention_mismatched_shapes_with_mask(self):
-        spatial_cross_att = butane.nn.SpatialCrossAttention2d(16, n_heads=2)
+        spatial_cross_att = butane.nn.SpatialCrossAttention(16, n_heads=2)
         mask = torch.ones(2, 9, dtype=torch.bool)
         mask[:, -2:] = False
         out = spatial_cross_att(torch.randn(2, 16, 4, 4), torch.randn(2, 16, 3, 3), mask=mask)

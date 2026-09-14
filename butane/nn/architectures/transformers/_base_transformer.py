@@ -35,6 +35,8 @@ class TransformerBlock(torch.nn.Module):
         adaLN_zero: bool = True,
         ctx_cross_attention: bool = False,
         ctx_dim: int | None = None,
+        activation: torch.nn.Module | None = None,
+        causal: bool = False,
     ) -> None:
 
         super().__init__()
@@ -61,13 +63,17 @@ class TransformerBlock(torch.nn.Module):
             self._input_dims,
             n_heads=attention_heads,
             dropout_p=attention_dropout,
-            apply_residual=False,
+            prenorm=False,
+            causal=causal,
         )
+
         self.mlp = MLPBlock(
             input_dims=self._input_dims,
             output_dims=self._input_dims,
             hidden_dims=[self._hidden_dims],
-            activation_function=[torch.nn.GELU(approximate="tanh")],
+            activation_function=[
+                activation if activation is not None else torch.nn.GELU(approximate="tanh")
+            ],
             output_activation=False,
         )
 
@@ -86,11 +92,10 @@ class TransformerBlock(torch.nn.Module):
             self.cattn_context_norm = torch.nn.LayerNorm(self._input_dims, elementwise_affine=False)
             self.cattn_context_module = CrossAttention(
                 self._input_dims,
-                kv_input_size=ctx_dim,
-                n_heads=cross_attention_heads,
+                kv_input_dim=ctx_dim,
+                n_heads=self._cross_attention_heads,
                 dropout_p=attention_dropout,
                 prenorm=False,
-                apply_residual=False,
             )
 
     def forward(
@@ -100,26 +105,38 @@ class TransformerBlock(torch.nn.Module):
         ctx: torch.Tensor | None = None,
         mask: torch.Tensor | None = None,
         ctx_mask: torch.Tensor | None = None,
+        *,
+        pos: torch.Tensor | None = None,
+        ctx_pos: torch.Tensor | None = None,
     ) -> torch.Tensor:
 
         # Vanilla Transformer/ViT/Trajectory Pathway (Zero modulation overhead)
         if not self._has_condition or emb is None:
-            x = x + self.attn(self.norm_pre_sa(x), mask=mask)
+            x = x + self.attn(self.norm_pre_sa(x), mask=mask, pos=pos)
             if self._ctx_cross_attention and ctx is not None:
-                x = x + self.cattn_context_module(self.cattn_context_norm(x), ctx, mask=ctx_mask)
+                x = x + self.cattn_context_module(
+                    self.cattn_context_norm(x), ctx, mask=ctx_mask, q_pos=pos, k_pos=ctx_pos
+                )
             x = x + self.mlp(self.norm_pre_mlp(x))
             return x
 
+        # Positions are applied inside attention, i.e. AFTER the adaLN modulation below.
+        # Modulation is a content operation driven by the conditioning vector; scaling the
+        # positional signal by gamma would make "where a token sits" conditioning-dependent.
         if self._adaLN_zero_path:
             gamma_1, beta_1, alpha_1, gamma_2, beta_2, alpha_2 = self.modulation_module(emb).chunk(
                 chunks=6, dim=1
             )
             x = x + alpha_1.unsqueeze(1) * self.attn(
-                self.norm_pre_sa(x) * (1 + gamma_1.unsqueeze(1)) + beta_1.unsqueeze(1), mask=mask
+                self.norm_pre_sa(x) * (1 + gamma_1.unsqueeze(1)) + beta_1.unsqueeze(1),
+                mask=mask,
+                pos=pos,
             )
 
             if self._ctx_cross_attention and ctx is not None:
-                x = x + self.cattn_context_module(self.cattn_context_norm(x), ctx, mask=ctx_mask)
+                x = x + self.cattn_context_module(
+                    self.cattn_context_norm(x), ctx, mask=ctx_mask, q_pos=pos, k_pos=ctx_pos
+                )
 
             x = x + alpha_2.unsqueeze(1) * self.mlp(
                 self.norm_pre_mlp(x) * (1 + gamma_2.unsqueeze(1)) + beta_2.unsqueeze(1)
@@ -127,11 +144,15 @@ class TransformerBlock(torch.nn.Module):
         else:
             gamma_1, beta_1, gamma_2, beta_2 = self.modulation_module(emb).chunk(chunks=4, dim=1)
             x = x + self.attn(
-                self.norm_pre_sa(x) * (1 + gamma_1.unsqueeze(1)) + beta_1.unsqueeze(1), mask=mask
+                self.norm_pre_sa(x) * (1 + gamma_1.unsqueeze(1)) + beta_1.unsqueeze(1),
+                mask=mask,
+                pos=pos,
             )
 
             if self._ctx_cross_attention and ctx is not None:
-                x = x + self.cattn_context_module(self.cattn_context_norm(x), ctx, mask=ctx_mask)
+                x = x + self.cattn_context_module(
+                    self.cattn_context_norm(x), ctx, mask=ctx_mask, q_pos=pos, k_pos=ctx_pos
+                )
 
             x = x + self.mlp(
                 self.norm_pre_mlp(x) * (1 + gamma_2.unsqueeze(1)) + beta_2.unsqueeze(1)
@@ -210,6 +231,7 @@ class _BaseTransformer(torch.nn.Module):
         ctx_cross_attention: bool = False,
         cross_attention_heads: int | None = None,
         ctx_in_context: bool = False,
+        activation: torch.nn.Module | None = None,
     ) -> None:
         super().__init__()
         self._input_dims = input_dims
@@ -321,6 +343,7 @@ class _BaseTransformer(torch.nn.Module):
                     adaLN_zero=self._adaLN_zero_path,
                     ctx_cross_attention=self._ctx_cross_attention,
                     ctx_dim=self._ctx_dim,
+                    activation=activation,
                 )
                 for _ in range(depth)
             ]
@@ -349,6 +372,14 @@ class _BaseTransformer(torch.nn.Module):
                 weight_init_method=torch.nn.init.xavier_uniform_,
                 bias_init_method=partial(torch.nn.init.constant_, val=0),
             )
+
+        for block in self.transformer_blocks:
+            if getattr(block, "modulation_module", None) is not None:
+                utils.zero_module(block.modulation_module)
+
+        utils.zero_module(self.output_layer.fc1)
+        if getattr(self.output_layer, "film", None) is not None:
+            utils.zero_module(self.output_layer.film)
 
     def _prepare_time(self, t: torch.Tensor | None = None) -> torch.Tensor | None:
         emb = None

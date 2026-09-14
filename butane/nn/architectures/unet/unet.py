@@ -8,23 +8,17 @@ import torch
 
 from ...._typedefs import *
 from ...modules.attention import (
-    SpatialCrossAttention1d,
-    SpatialCrossAttention2d,
-    SpatialCrossAttention3d,
-    SpatialSelfAttention1d,
-    SpatialSelfAttention2d,
-    SpatialSelfAttention3d,
+    SpatialCrossAttention,
+    SpatialSelfAttention,
 )
 from ...modules.conv_blocks import Conv1dBlock, Conv2dBlock, Conv3dBlock
 from ...modules.embeddings import (
     FourierEmbeddings,
-    LearnableEmbeddings,
-    SinusoidalEmbeddings,
 )
 from ...modules.mlp_block import MLPBlock
 from ...modules.residual_blocks import *
 from ...utils import utils
-from ...wrapper import XDependent, XDependentSequential
+from ...wrapper import Residual, XDependent, XDependentSequential
 from .blocks import *
 
 
@@ -39,7 +33,7 @@ class CrossAttentionCondition(XDependent):
             raise ValueError("CrossAttentionCondition expects a valid context tensor `ctx`.")
         if ctx.ndim == 2:
             ctx = ctx.unsqueeze(-1)
-        return self.cross_attention(x1=x, x2=ctx)
+        return x + self.cross_attention(q=x, kv=ctx)
 
 
 # TOOD: Fix input size handling
@@ -52,8 +46,8 @@ class UNetNd(torch.nn.Module):
     residual_block_creator: torch.nn.Module
     downsample: torch.nn.Module
     upsample: torch.nn.Module
-    attention_block: torch.nn.Module
-    cross_attention_block: torch.nn.Module
+    attention_block = SpatialSelfAttention
+    cross_attention_block = SpatialCrossAttention
     dims: int
 
     def __init__(
@@ -180,7 +174,7 @@ class UNetNd(torch.nn.Module):
                 )
 
                 if i in attention_channel_idx:
-                    _subblock.append(_attention_module(_downsample_input_dims[0]))
+                    _subblock.append(Residual(_attention_module(_downsample_input_dims[0])))
 
                 if self._ctx_cross_attention and i in cross_attention_channel_idx:
                     _subblock.append(
@@ -232,7 +226,7 @@ class UNetNd(torch.nn.Module):
             )
             if (i + 1) != self._n_middle_blocks:
                 if attention:
-                    _subblock.append(_attention_module(_middle_input_dims[0]))
+                    _subblock.append(Residual(_attention_module(_middle_input_dims[0])))
 
                 if self._ctx_cross_attention and i in cross_attention_channel_idx:
                     _subblock.append(
@@ -258,6 +252,7 @@ class UNetNd(torch.nn.Module):
                         input_dims=_skip_connection_input_dims,
                         embedding_size=self._embedding_size,
                         dropout=self._dropout,
+                        n_groups=n_groups,
                         output_channels=ch,
                         zero_out=zero_conv,
                         fusion_type=self._fusion_type,
@@ -268,7 +263,7 @@ class UNetNd(torch.nn.Module):
                 )
 
                 if i in attention_channel_idx:
-                    _subblock.append(_attention_module(_upsample_input_dims[0]))
+                    _subblock.append(Residual(_attention_module(_upsample_input_dims[0])))
 
                 if self._ctx_cross_attention and i in cross_attention_channel_idx:
                     _subblock.append(
@@ -373,17 +368,14 @@ class UNetNd(torch.nn.Module):
             attention_channel_idx = list(range(len(self._channels)))
         _attention_channel_idx = attention_channel_idx
         kwargs = dict(
-            kernel_size=1,
             n_heads=attention_heads,
             dropout_p=attention_dropout,
             prenorm=partial(torch.nn.GroupNorm, num_groups=n_groups),
             bias=True,
-            apply_residual=True,
             zero_out=zero_conv,
         )
         if is_cross:
-            kwargs["kv_input_size"] = self._ctx_dim
-            kwargs["kv_n_dims"] = 1
+            kwargs["kv_input_dim"] = self._ctx_dim
 
         _attention_module = partial(
             self.attention_block if not is_cross else self.cross_attention_block, **kwargs
@@ -534,8 +526,6 @@ class UNet1d(UNetNd):
     residual_block_creator = ResBlock1d
     downsample = Downsample1d
     upsample = Upsample1d
-    attention_block = SpatialSelfAttention1d
-    cross_attention_block = SpatialCrossAttention1d
     dims = 1
 
 
@@ -547,8 +537,6 @@ class UNet2d(UNetNd):
     residual_block_creator = ResBlock2d
     downsample = Downsample2d
     upsample = Upsample2d
-    attention_block = SpatialSelfAttention2d
-    cross_attention_block = SpatialCrossAttention2d
     dims = 2
 
 
@@ -560,6 +548,4 @@ class UNet3d(UNetNd):
     residual_block_creator = ResBlock3d
     downsample = Downsample3d
     upsample = Upsample3d
-    attention_block = SpatialSelfAttention3d
-    cross_attention_block = SpatialCrossAttention3d
     dims = 3
