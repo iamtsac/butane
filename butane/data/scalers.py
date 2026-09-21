@@ -9,19 +9,12 @@ from .datasets import Dataset, TrajectoryDataset
 from .transforms import Transforms
 
 
-def _get_dict_depth(d: any) -> int:
-    """Recursively calculates the maximum nesting depth of a dictionary."""
-    if not isinstance(d, dict) or not d:
-        return 0
-    return 1 + max(_get_dict_depth(v) for v in d.values())
-
-
 class Scaler(ABC, torch.nn.Module):
     def __init__(self) -> None:
         super().__init__()
         self.is_fitted = False
         self._fitted_data_shape = None
-        self._dims = (1,)
+        self.dims = (1,)
 
     @abstractmethod
     def _scale(self, x: torch.Tensor) -> torch.Tensor: ...
@@ -50,6 +43,20 @@ class Scaler(ABC, torch.nn.Module):
         if out.ndim > x.ndim:
             out = out.squeeze(0)
         return out
+
+    def get_extra_state(self) -> dict:
+        return {"is_fitted": self.is_fitted, "dims": self.dims}
+
+    def set_extra_state(self, state: dict) -> None:
+        self.is_fitted = state["is_fitted"]
+        self.dims = state["dims"]
+
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        # Fitting reshapes the buffers to the data, so an unfitted scaler takes the saved shapes first
+        for name, buffer in self._buffers.items():
+            if buffer is not None and prefix + name in state_dict:
+                self._buffers[name] = torch.empty_like(state_dict[prefix + name], device=buffer.device)
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
 
 
 class DummyScaler(Scaler):
@@ -109,7 +116,6 @@ class MinMaxScaler(Scaler):
         self.register_buffer("max_val", torch.tensor(max_val, dtype=torch.float32))
         self.register_buffer("xmax", torch.empty(0, dtype=torch.float32))
         self.register_buffer("xmin", torch.empty(0, dtype=torch.float32))
-        self.dims = (1,)
 
     def fit(
         self,
@@ -140,14 +146,11 @@ class MinMaxScaler(Scaler):
     def __repr__(self) -> str:
         return f"MinMaxScaler(min={self.xmin.flatten()}, max={self.xmax.flatten()})"
 
+
 class ManualScaler(Scaler):
     def __init__(self, scale: float | list[float] | tuple[float] = 1.0) -> None:
         super().__init__()
-        if isinstance(scale, (list, tuple)):
-            self.register_buffer("scale", torch.empty(len(scale), dtype=torch.float32))
-        else:
-            self.register_buffer("scale", torch.empty(0, dtype=torch.float32))
-        self.dims = (1,)
+        self.register_buffer("scale", torch.as_tensor(scale, dtype=torch.float32))
 
     def fit(
         self,
@@ -164,103 +167,7 @@ class ManualScaler(Scaler):
 
     def _unscale(self, x: torch.Tensor) -> torch.Tensor:
         eps = 1e-12
-        return x_std * (self.scale + eps)
+        return x * (self.scale + eps)
 
     def __repr__(self) -> str:
-        return f"ManualScaler(scale={self.scaling_factor})"
-
-class DecoupledScalerSchema(torch.nn.Module):
-    """
-    A unified PyTorch module schema that decouples and tracks independent
-    scaling transformations for input contexts ('data') and target contexts ('targets').
-    Supports both nested dictionary structures and pure tensor dataset payloads.
-    """
-
-    def __init__(self, scalers_cfg: dict[str, dict[str, type[Scaler]]], sep: str = "/"):
-        super().__init__()
-        self.scalers_cfg = scalers_cfg
-        self.sep = sep
-
-        # Stateful PyTorch containers tracked automatically for .to(device) and saving
-        self.data_scalers = torch.nn.ModuleDict()
-        self.target_scalers = torch.nn.ModuleDict()
-
-    def fit(self, X: dict[str, dict[str, torch.Tensor]], feature_dim: int) -> None:
-        """Fits scalers directly using solid collected PyTorch tensors."""
-        scalers_map = {"data": self.data_scalers, "targets": self.target_scalers}
-
-        # Inspect tensor keys and instantiate scaler match rules
-
-        for context in ["data", "targets"]:
-            if context not in self.scalers_cfg or context not in X:
-                continue
-
-            rules = self.scalers_cfg[context]
-            default_scaler_cls = rules.get("default", DummyScaler)
-
-            for key in X[context].keys():
-                chosen_scaler_cls = default_scaler_cls
-                for pattern_str, scaler_cls in rules.items():
-                    if pattern_str != "default" and re.search(pattern_str, key):
-                        chosen_scaler_cls = scaler_cls
-                        break
-                scalers_map[context][key] = chosen_scaler_cls()
-
-        # Fit stateful parameters on aggregated tensors
-        with torch.no_grad():
-            for context in ["data", "targets"]:
-                if context not in X:
-                    continue
-
-                for key, data_tensor in X[context].items():
-                    if key not in scalers_map[context]:
-                        continue
-
-                    scaler_instance = scalers_map[context][key]
-                    if isinstance(scaler_instance, DummyScaler):
-                        scalers_map[context].pop(key)
-                        continue
-
-                    mask = X.get(f"{context}_masks", {}).get(key, None)
-                    if mask is not None:
-                        valid_data = data_tensor[mask == True]
-                    else:
-                        valid_data = data_tensor
-                    lost_a_dim = (data_tensor.ndim - 1) == valid_data.ndim
-                    if lost_a_dim:
-                        valid_data = valid_data.unsqueeze(0)
-                    if hasattr(scaler_instance, "fit"):
-                        scaler_instance.fit(valid_data, dims=feature_dim)
-
-    def forward(
-        self,
-        batch: dict[str, torch.Tensor] | torch.Tensor,
-        context: str | None = "data",
-        inverse: bool = False,
-    ) -> dict[str, torch.Tensor] | torch.Tensor:
-        if context is None:
-            assert isinstance(batch, dict), "Batch must be a dict when context is None."
-            out = {}
-            if "data" in batch:
-                out["data"] = self.forward(batch["data"], context="data", inverse=inverse)
-            if "targets" in batch:
-                out["targets"] = self.forward(batch["targets"], context="targets", inverse=inverse)
-            for k, v in batch.items():
-                if k not in out:
-                    out[k] = v
-            return out
-
-        assert context in ["data", "targets"], "Context must be 'data' or 'targets'."
-        scaler_group = self.data_scalers if context == "data" else self.target_scalers
-
-        if torch.is_tensor(batch):
-            return (
-                scaler_group["__root__"](batch, inverse=inverse)
-                if "__root__" in scaler_group
-                else batch
-            )
-
-        return {
-            k: scaler_group[k](v, inverse=inverse) if k in scaler_group else v
-            for k, v in batch.items()
-        }
+        return f"ManualScaler(scale={self.scale.flatten()})"

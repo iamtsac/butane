@@ -8,7 +8,7 @@ if __name__ == "__main__":
 
     pemb = butane.nn.SinusoidalEmbeddings(10)
     x = torch.rand(10, 100, 10)
-    emb = x + pemb(x)
+    emb = x + pemb(torch.arange(x.size(1)))
 
     attention = butane.nn.SelfAttention(10, n_heads = 5)
     print(attention)

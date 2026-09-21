@@ -8,7 +8,7 @@ import torch
 
 from ...._typedefs import *
 from ...modules.attention import (
-    SpatialCrossAttention,
+    CrossAttention,
     SpatialSelfAttention,
 )
 from ...modules.conv_blocks import Conv1dBlock, Conv2dBlock, Conv3dBlock
@@ -23,17 +23,28 @@ from .blocks import *
 
 
 class CrossAttentionCondition(XDependent):
-    def __init__(self, input_dims: int, attention: torch.nn.Module):
+    """A feature map attending over a (B, L, ctx_dim) condition sequence.
+
+    The feature map is the only spatial side, so it is normalized channels-first and flattened
+    here; the condition keeps the token layout its encoder produced.
+    """
+
+    def __init__(self, input_dims: int, attention: torch.nn.Module, n_groups: int, ctx_dim: int):
         super().__init__()
         self._input_dims = input_dims
+        self.q_norm = torch.nn.GroupNorm(num_groups=n_groups, num_channels=input_dims)
+        self.kv_norm = torch.nn.LayerNorm(ctx_dim)
         self.cross_attention = attention(input_dims)
 
     def forward(self, x: torch.Tensor, t: torch.Tensor, ctx: torch.Tensor) -> torch.Tensor:
         if ctx is None:
             raise ValueError("CrossAttentionCondition expects a valid context tensor `ctx`.")
         if ctx.ndim == 2:
-            ctx = ctx.unsqueeze(-1)
-        return x + self.cross_attention(q=x, kv=ctx)
+            ctx = ctx.unsqueeze(1)  # a flat condition is one token
+        batch_size, _, *spatial = x.shape
+        q = self.q_norm(x).flatten(2).transpose(1, 2)
+        attended = self.cross_attention(q=q, kv=self.kv_norm(ctx))
+        return x + attended.transpose(1, 2).reshape(batch_size, self._input_dims, *spatial)
 
 
 # TOOD: Fix input size handling
@@ -47,7 +58,7 @@ class UNetNd(torch.nn.Module):
     downsample: torch.nn.Module
     upsample: torch.nn.Module
     attention_block = SpatialSelfAttention
-    cross_attention_block = SpatialCrossAttention
+    cross_attention_block = CrossAttention
     dims: int
 
     def __init__(
@@ -145,6 +156,11 @@ class UNetNd(torch.nn.Module):
         if self._ctx_concat and self._time_dependent:
             if ctx_dim is None:
                 raise ValueError("ctx_dim must be provided when ctx_concat=True")
+            if self._ctx_cross_attention:
+                raise ValueError(
+                    "ctx_concat appends a flat (B, ctx_dim) condition to the time embedding, while "
+                    "ctx_cross_attention reads a (B, L, ctx_dim) sequence; pick one."
+                )
             self._embedding_size += ctx_dim
 
         self.input_layer = self.conv(self._input_dims[0], self._channels[0], 3, padding=1)
@@ -178,7 +194,9 @@ class UNetNd(torch.nn.Module):
 
                 if self._ctx_cross_attention and i in cross_attention_channel_idx:
                     _subblock.append(
-                        CrossAttentionCondition(_downsample_input_dims[0], _cross_attention_module)
+                        CrossAttentionCondition(
+                            _downsample_input_dims[0], _cross_attention_module, n_groups, self._ctx_dim
+                        )
                     )
 
                 self.downsample_blocks.append(_subblock)
@@ -230,7 +248,9 @@ class UNetNd(torch.nn.Module):
 
                 if self._ctx_cross_attention and i in cross_attention_channel_idx:
                     _subblock.append(
-                        CrossAttentionCondition(_middle_input_dims[0], _cross_attention_module)
+                        CrossAttentionCondition(
+                            _middle_input_dims[0], _cross_attention_module, n_groups, self._ctx_dim
+                        )
                     )
             self.middle_blocks.append(_subblock)
 
@@ -267,7 +287,9 @@ class UNetNd(torch.nn.Module):
 
                 if self._ctx_cross_attention and i in cross_attention_channel_idx:
                     _subblock.append(
-                        CrossAttentionCondition(_upsample_input_dims[0], _cross_attention_module)
+                        CrossAttentionCondition(
+                            _upsample_input_dims[0], _cross_attention_module, n_groups, self._ctx_dim
+                        )
                     )
 
                 if i and j == self._n_residual_blocks:
@@ -375,7 +397,9 @@ class UNetNd(torch.nn.Module):
             zero_out=zero_conv,
         )
         if is_cross:
+            # CrossAttentionCondition normalizes both streams itself, in each one's own layout
             kwargs["kv_input_dim"] = self._ctx_dim
+            kwargs["prenorm"] = None
 
         _attention_module = partial(
             self.attention_block if not is_cross else self.cross_attention_block, **kwargs

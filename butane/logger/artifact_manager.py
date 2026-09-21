@@ -1,5 +1,4 @@
 import csv
-import yaml
 import numbers
 import shutil
 import logging
@@ -7,11 +6,7 @@ import numpy as np
 from pathlib import Path
 from typing import Optional, List, Dict, Union, Any
 
-class _LiteralDumper(yaml.SafeDumper): pass
-def _multiline_str_presenter(dumper: yaml.SafeDumper, data: str):
-    style = "|" if "\n" in data else None
-    return dumper.represent_scalar("tag:yaml.org,2002:str", data, style=style)
-_LiteralDumper.add_representer(str, _multiline_str_presenter)
+from .config_yaml import dump_config
 
 class ArtifactManager:
     def __init__(self, work_dir: Path, logger: logging.Logger):
@@ -19,11 +14,14 @@ class ArtifactManager:
         self.logger = logger
         self._config = {}
 
-    def save_config(self, config: dict) -> None:
-        clean_config = self._sanitize_config(config)
-        self._config.update(clean_config)
+    def save_config(self, config: Any) -> None:
+        """Dicts merge into what was saved before, any other config (e.g. a dataclass) replaces it."""
+        if isinstance(config, dict) and isinstance(self._config, dict):
+            self._config.update(config)
+        else:
+            self._config = config
         with open(self.work_dir / 'config.yaml', 'w', encoding='utf-8') as f:
-            yaml.dump(self._config, f, sort_keys=False, allow_unicode=True, Dumper=_LiteralDumper)
+            f.write(dump_config(self._config))
 
     def save_csv(self, name: str, data: Dict[str, List], analysis_dir: Optional[Path]) -> Optional[Path]:
         target_dir = analysis_dir if analysis_dir else (self.work_dir / "analysis")

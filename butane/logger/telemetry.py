@@ -15,6 +15,7 @@ class WandbManager:
         self._init_run(overwrite, resume)
 
     def _init_run(self, overwrite: bool, resume: bool):
+        from wandb.sdk.lib.runid import generate_id
         project = os.environ.get("WANDB_PROJECT")
         name = os.environ.get("WANDB_RUN")
         assert project is not None, "Set the WANDB_PROJECT env variable"
@@ -29,7 +30,7 @@ class WandbManager:
         if resume and not overwrite and lineage_ids:
             run_name = lineage_ids[-1]
         else:
-            run_id = self.wandb.util.generate_id()
+            run_id = generate_id()
             run_name = f"{self.fpath.name}_{run_id}" if name is None else name
 
         mode = "a" if (resume and not overwrite) else "w"

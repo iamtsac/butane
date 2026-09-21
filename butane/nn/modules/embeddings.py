@@ -11,11 +11,10 @@ class LearnableEmbeddings(torch.nn.Module):
         self._embeddings = torch.nn.Embedding(max_seq_len, d_model)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        assert x.dim() >= 2, (
-            f"Positional embeddings need a sequence axis (B, L, ...), got {x.dim()}D"
-        )
-        pos = torch.arange(x.size(1), dtype=torch.int32, device=self._embeddings.weight.device)
-        return self._embeddings(pos)
+        """Integer positions (L,) or (L, 1) -> (L, d_model), a lookup so positions must be < max_seq_len."""
+        if x.dim() > 1:
+            x = x.squeeze(-1)
+        return self._embeddings(x.long())
 
     @property
     def embeddings(self) -> torch.Tensor:
@@ -26,13 +25,14 @@ class FourierEmbeddings(torch.nn.Module):
     def __init__(
         self,
         d_model: int,
-        max_seq_len: Optional[int] = 10_000,
+        base: float = 10_000.0,
         learnable: bool = False
     ) -> None:
         super().__init__()
         d_model_half = d_model // 2
+        self._odd = d_model % 2 == 1
         _omega = torch.exp(
-            -math.log(max_seq_len) * (torch.arange(0, d_model_half, dtype=torch.float32) / d_model_half)
+            -math.log(base) * (torch.arange(0, d_model_half, dtype=torch.float32) / d_model_half)
         )
         self._omega = torch.nn.Parameter(_omega, requires_grad=learnable)
 
@@ -42,43 +42,39 @@ class FourierEmbeddings(torch.nn.Module):
         seq_len = x.size(1)
         phase = self._omega[None] * x
         embeddings = torch.cat([torch.cos(phase), torch.sin(phase)], dim=-1)
+        if self._odd:
+            # [cos|sin] is even wide, an odd d_model takes the zero channel DDPM pads with
+            embeddings = torch.nn.functional.pad(embeddings, (0, 1))
         return embeddings
 
     @staticmethod
-    def get_embeddings(x: torch.Tensor, d_model: int, max_seq_len: Optional[int] = 10_000) -> torch.Tensor:
-        return FourierEmbeddings(d_model, max_seq_len=max_seq_len)(x)
+    def get_embeddings(x: torch.Tensor, d_model: int, base: float = 10_000.0) -> torch.Tensor:
+        return FourierEmbeddings(d_model, base=base)(x)
 
 class SinusoidalEmbeddings(torch.nn.Module):
     def __init__(
         self,
         d_model: int,
-        max_seq_len: Optional[int] = 10_000,
+        base: float = 10_000.0,
         learnable: bool = False
-    ) -> None :
+    ) -> None:
         super().__init__()
-        _pe = torch.zeros((max_seq_len, d_model))
-        pos = torch.arange(max_seq_len).unsqueeze(1)
-        div_term = torch.pow(10_000, torch.arange(0, d_model, 2) / d_model)
-        # An odd d_model leaves one more sin channel than cos, so each half takes the slice of
-        # div_term it actually has room for.
-        n_sin, n_cos = _pe[:, 0::2].shape[1], _pe[:, 1::2].shape[1]
-        _pe[:, 0::2] = torch.sin(pos / div_term[:n_sin])
-        _pe[:, 1::2] = torch.cos(pos / div_term[:n_cos])
-        self._PE = torch.nn.Parameter(_pe, requires_grad=learnable)
+        self._d_model = d_model
+        # One frequency per sin/cos pair, 1 / base^(2i / d_model)
+        _omega = torch.pow(base, -torch.arange(0, d_model, 2, dtype=torch.float32) / d_model)
+        self._omega = torch.nn.Parameter(_omega, requires_grad=learnable)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        assert x.dim() >= 2, (
-            f"Positional embeddings need a sequence axis (B, L, ...), got {x.dim()}D"
-        )
-        seq_len = x.size(1)
-        assert seq_len <= self._PE.size(0), (
-            f"Sequence of {seq_len} exceeds the table's {self._PE.size(0)}; raise max_seq_len."
-        )
-        return self._PE[:seq_len, :]
+        """Positions (L,) or (L, 1), integer or continuous -> (L, d_model), sin/cos interleaved."""
+        if x.dim() == 1:
+            x = x[..., None]
+        phase = self._omega[None] * x
+        # An odd d_model ends on a sin channel, so the last cos is dropped
+        return torch.stack([torch.sin(phase), torch.cos(phase)], dim=-1).flatten(-2)[..., : self._d_model]
 
     @staticmethod
-    def get_embeddings(x: torch.Tensor, d_model: int, max_seq_len: Optional[int] = 10_000) -> torch.Tensor:
-        return SinusoidalEmbeddings(d_model, max_seq_len=max_seq_len)(x)
+    def get_embeddings(x: torch.Tensor, d_model: int, base: float = 10_000.0) -> torch.Tensor:
+        return SinusoidalEmbeddings(d_model, base=base)(x)
 
 class PatchEmbeddingsNd(torch.nn.Module):
     conv: torch.nn.Module

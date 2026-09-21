@@ -161,12 +161,13 @@ class TestUNetConditioningVariations:
             cross_attention_channel_idx=[0, 1],
             attention_heads=2,
             ctx_dim=ctx_dim,
+            ctx_concat=False,
         )
 
         if ctx_shape == "flat":
             ctx = torch.randn(x.shape[0], ctx_dim)
         else:
-            ctx = torch.randn(x.shape[0], ctx_dim, 5)
+            ctx = torch.randn(x.shape[0], 5, ctx_dim)  # (B, L, ctx_dim) tokens
 
         out = model(x, t, ctx=ctx)
         assert out.shape == x.shape

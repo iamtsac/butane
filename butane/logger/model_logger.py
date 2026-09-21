@@ -1,4 +1,5 @@
 import sys
+import dataclasses
 import logging
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Union
@@ -140,10 +141,17 @@ class ModelLogger:
         mode = "Infinite" if patience == -1 else str(patience)
         self.logger.info(f"Monitor Enabled (Patience: {mode}, Tolerance: {tolerance*100:.0f}%)")
 
-    def add_config(self, **config):
-        if not self.env.eval_mode:
-            self.artifacts.save_config(config)
-            if self.telemetry: self.telemetry.update_config(config)
+    def add_config(self, config: Any = None, **values):
+        """`config` is any object `dump_config` can store (e.g. a dataclass), `values` merge as a dict."""
+        if self.env.eval_mode:
+            return
+        for c in (config, values or None):
+            if c is None:
+                continue
+            self.artifacts.save_config(c)
+            if self.telemetry:
+                flat = dataclasses.asdict(c) if dataclasses.is_dataclass(c) else c
+                self.telemetry.update_config(ArtifactManager._sanitize_config(flat))
 
     def add_plot(self, name: str, plot: Any, **kwargs):
         path = self.artifacts.save_media(name, plot, self.env.output_path, **kwargs)

@@ -320,6 +320,16 @@ class TrajectoryDataset(Dataset):
                 self.data[key] = [torch.as_tensor(d, device=self._device) for d in val]
 
         self._apply_drop_last_frames(n_episodes)
+        self._build_index()
+
+    def _build_index(self) -> None:
+        """Maps every window index to its (episode, pivot step), from the episodes now held.
+
+        Called once on ingest and again by `split`, which drops whole episodes and so invalidates
+        every index past the first one it removed.
+        """
+        anchor = self._resolve_anchor_key(self.data)
+        n_episodes = len(self.data[anchor])
 
         sample_to_episode = []
         sample_to_local_t = []
@@ -351,6 +361,56 @@ class TrajectoryDataset(Dataset):
         self.sample_to_local_t = torch.tensor(
             sample_to_local_t, dtype=torch.long, device=self._device
         )
+
+    def split(
+        self, percentage: float, generator: torch.Generator | None = None
+    ) -> "TrajectoryDataset":
+        """Keeps `percentage` of the windows here and returns the rest, as `Dataset.split` does
+        with rows - except the cut falls on whole EPISODES.
+
+        Neighbouring windows share frames through their history and horizon, so a row-wise split
+        would leave the same frames on both sides: anything fitted on the returned half (a
+        conformal bound, a validation score) would already have seen its frames in training.
+        Whole episodes means the kept share only lands as close to `percentage` as one episode
+        allows.
+        """
+        anchor = self._resolve_anchor_key(self.data)
+        windows = [max(ep.shape[0] - self.trim_end, 0) for ep in self.data[anchor]]
+        order = torch.randperm(len(windows), generator=generator).tolist()
+
+        # Stop at the episode boundary nearest the asked share, over or under it
+        wanted = percentage * sum(windows)
+        kept_windows, keep_n = 0, 0
+        for position, episode in enumerate(order):
+            if abs(kept_windows + windows[episode] - wanted) > abs(kept_windows - wanted):
+                break
+            kept_windows += windows[episode]
+            keep_n = position + 1
+
+        keep, moved = sorted(order[:keep_n]), sorted(order[keep_n:])
+        if not keep or not moved:
+            raise ValueError(
+                f"a {percentage:.3g} split of {len(order)} episode(s) leaves one side empty - a "
+                f"trajectory dataset splits whole episodes, so it needs at least one on each side."
+            )
+
+        split_ds = TrajectoryDataset(
+            data={key: [episodes[i] for i in moved] for key, episodes in self.data.items()},
+            horizon=self.horizon,
+            history=self.history + 1,  # __init__ stores it as the number of lookback steps
+            align_start=self.align_start,
+            trim_end=self.trim_end,
+            drop_last_frames=0,  # already applied to these frames on ingest
+            anchor_key=self.anchor_key,
+            pad_left_fn=self.pad_left_fn,
+            pad_right_fn=self.pad_right_fn,
+            on_demand_device_load=self._on_demand_device_load,
+            return_tuple=self._return_tuple,
+            device=self._device,
+        )
+        self.data = {key: [episodes[i] for i in keep] for key, episodes in self.data.items()}
+        self._build_index()
+        return split_ds
 
     def _apply_drop_last_frames(self, n_episodes: int) -> None:
         """Removes trailing FRAMES from every modality of each episode, in place.
