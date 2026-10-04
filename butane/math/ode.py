@@ -70,8 +70,8 @@ def _euler_explicit(
                 if return_func_outputs:
                     dxs[i][k-1].copy_(_dx[i])
 
-    # Instantenious evaluation; we cannot take any other step
-    _dx = _step(func, steps[-1], tuple(x))
+    # func at the last grid point is only reported, the state is already integrated
+    _dx = _step(func, steps[-1], tuple(x)) if return_func_outputs else None
     if return_trajectory:
         for i in range(num_vars):
             if return_func_outputs:
@@ -136,15 +136,15 @@ def _rk4(
                 if return_func_outputs:
                     dxs[i][k-1].copy_(_tmp_tensor[i])
 
-    # Instantenious evaluation; we cannot take any other step
-    _dx = _step(func, steps[-1], tuple(x))
+    # func at the last grid point is only reported, the state is already integrated
+    _dx = _step(func, steps[-1], tuple(x)) if return_func_outputs else None
     if return_trajectory:
         for i in range(num_vars):
             if return_func_outputs:
                 dxs[i][-1].copy_(_dx[i])
         return _unwrap_output(xs, dxs, _is_tensor)
     else:
-        return _unwrap_output(x, _tmp_tensor, _is_tensor)
+        return _unwrap_output(x, _dx, _is_tensor)
 
 @torch.no_grad()
 def _heun2(
@@ -192,15 +192,15 @@ def _heun2(
                 if return_func_outputs:
                     dxs[i][k-1].copy_(_tmp_tensor[i])
 
-    # Instantenious evaluation; we cannot take any other step
-    _dx = _step(func, steps[-1], tuple(x))
+    # func at the last grid point is only reported, the state is already integrated
+    _dx = _step(func, steps[-1], tuple(x)) if return_func_outputs else None
     if return_trajectory:
         for i in range(num_vars):
             if return_func_outputs:
                 dxs[i][-1].copy_(_dx[i])
         return _unwrap_output(xs, dxs, _is_tensor)
     else:
-        return _unwrap_output(x, _tmp_tensor, _is_tensor)
+        return _unwrap_output(x, _dx, _is_tensor)
 
 def odeint(
     func: Callable,

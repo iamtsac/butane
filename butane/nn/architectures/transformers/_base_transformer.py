@@ -23,6 +23,11 @@ from ...utils import utils
 from .transformer_utils import *
 
 
+def _per_token(modulation: torch.Tensor) -> torch.Tensor:
+    """(B, F) -> (B, 1, F), one modulation broadcast over the tokens; (B, N, F) is already one per token."""
+    return modulation.unsqueeze(1) if modulation.dim() == 2 else modulation
+
+
 class TransformerBlock(torch.nn.Module):
     def __init__(
         self,
@@ -123,12 +128,11 @@ class TransformerBlock(torch.nn.Module):
         # Positions are applied inside attention, i.e. AFTER the adaLN modulation below.
         # Modulation is a content operation driven by the conditioning vector; scaling the
         # positional signal by gamma would make "where a token sits" conditioning-dependent.
+        modulation = _per_token(self.modulation_module(emb))
         if self._adaLN_zero_path:
-            gamma_1, beta_1, alpha_1, gamma_2, beta_2, alpha_2 = self.modulation_module(emb).chunk(
-                chunks=6, dim=1
-            )
-            x = x + alpha_1.unsqueeze(1) * self.attn(
-                self.norm_pre_sa(x) * (1 + gamma_1.unsqueeze(1)) + beta_1.unsqueeze(1),
+            gamma_1, beta_1, alpha_1, gamma_2, beta_2, alpha_2 = modulation.chunk(chunks=6, dim=-1)
+            x = x + alpha_1 * self.attn(
+                self.norm_pre_sa(x) * (1 + gamma_1) + beta_1,
                 mask=mask,
                 pos=pos,
             )
@@ -138,13 +142,11 @@ class TransformerBlock(torch.nn.Module):
                     self.cattn_context_norm(x), ctx, mask=ctx_mask, q_pos=pos, k_pos=ctx_pos
                 )
 
-            x = x + alpha_2.unsqueeze(1) * self.mlp(
-                self.norm_pre_mlp(x) * (1 + gamma_2.unsqueeze(1)) + beta_2.unsqueeze(1)
-            )
+            x = x + alpha_2 * self.mlp(self.norm_pre_mlp(x) * (1 + gamma_2) + beta_2)
         else:
-            gamma_1, beta_1, gamma_2, beta_2 = self.modulation_module(emb).chunk(chunks=4, dim=1)
+            gamma_1, beta_1, gamma_2, beta_2 = modulation.chunk(chunks=4, dim=-1)
             x = x + self.attn(
-                self.norm_pre_sa(x) * (1 + gamma_1.unsqueeze(1)) + beta_1.unsqueeze(1),
+                self.norm_pre_sa(x) * (1 + gamma_1) + beta_1,
                 mask=mask,
                 pos=pos,
             )
@@ -154,9 +156,7 @@ class TransformerBlock(torch.nn.Module):
                     self.cattn_context_norm(x), ctx, mask=ctx_mask, q_pos=pos, k_pos=ctx_pos
                 )
 
-            x = x + self.mlp(
-                self.norm_pre_mlp(x) * (1 + gamma_2.unsqueeze(1)) + beta_2.unsqueeze(1)
-            )
+            x = x + self.mlp(self.norm_pre_mlp(x) * (1 + gamma_2) + beta_2)
         return x
 
 
@@ -192,8 +192,8 @@ class FinalBlock(torch.nn.Module):
 
     def forward(self, x: torch.Tensor, emb: torch.Tensor | None = None) -> torch.Tensor:
         if self._has_condition and emb is not None:
-            gamma, beta = self.film(emb).chunk(chunks=2, dim=1)
-            x = self.norm(x) * (1 + gamma.unsqueeze(1)) + beta.unsqueeze(1)
+            gamma, beta = _per_token(self.film(emb)).chunk(chunks=2, dim=-1)
+            x = self.norm(x) * (1 + gamma) + beta
         else:
             x = self.norm(x)
         x = self.fc1(x)

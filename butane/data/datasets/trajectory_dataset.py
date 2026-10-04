@@ -1,21 +1,16 @@
 import copy
 from collections import defaultdict
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Collection, Sequence
 
 import numpy as np
 import torch
 
+from ._trajectory_dataset_utils import (
+    GoalSampler,
+    _default_pad_left,
+    _default_pad_right,
+)
 from .dataset import Dataset
-
-
-def _default_pad_left(input_tensor: torch.Tensor, pad_len: int) -> torch.Tensor:
-    """Pads the tensor on the left by repeating the first element."""
-    return torch.cat([input_tensor[0:1].repeat_interleave(pad_len, dim=0), input_tensor], dim=0)
-
-
-def _default_pad_right(input_tensor: torch.Tensor, pad_len: int) -> torch.Tensor:
-    """Pads the tensor on the right by repeating the last element."""
-    return torch.cat([input_tensor, input_tensor[-1:].repeat_interleave(pad_len, dim=0)], dim=0)
 
 
 class TrajectoryDataset(Dataset):
@@ -41,6 +36,7 @@ class TrajectoryDataset(Dataset):
         | Callable[[torch.Tensor, int], torch.Tensor] = _default_pad_left,
         pad_right_fn: dict[str, Callable[[torch.Tensor, int], torch.Tensor]]
         | Callable[[torch.Tensor, int], torch.Tensor] = _default_pad_right,
+        goals: dict[str, GoalSampler] | None = None,
         on_demand_device_load: bool = False,
         return_tuple: bool = False,
         device: torch.device = "cpu",
@@ -63,12 +59,14 @@ class TrajectoryDataset(Dataset):
         self.trim_end = trim_end
         self.drop_last_frames = drop_last_frames
         self.anchor_key = anchor_key
+        self.goals = dict(goals or {})  # Before ingest: `_build_index` reads it
 
         # Storage for episodic data sequences: dict[str, list[torch.Tensor]]
         self.data: dict[str, list[torch.Tensor]] = {}
 
         # Ingest and separate into discrete episodes
         self._ingest_data(data)
+        self._check_goals()
         self._setup_padding(pad_left_fn=pad_left_fn, pad_right_fn=pad_right_fn)
 
     @property
@@ -159,6 +157,15 @@ class TrajectoryDataset(Dataset):
                 key, tensor, horiz_w_start, horiz_w_end
             )
 
+        for name, sampler in self.goals.items():
+            # One frame for every source: `_check_goals` made sure their episodes line up
+            lengths, starts = self._goal_index[sampler.sources[0]]
+            t = min(local_t, int(lengths[ep_idx]) - 1)  # Modalities may differ in length
+            goal_ep, goal_t = sampler.sample(ep_idx, t, lengths, starts)
+            for key, source in sampler.output_keys(name).items():
+                data_dict[key] = self.data[source][goal_ep][goal_t : goal_t + 1]
+                data_masks[key] = torch.ones(1, dtype=torch.bool, device=self._device)
+
         sample = {
             "data": data_dict,
             "targets": target_dict,
@@ -175,10 +182,12 @@ class TrajectoryDataset(Dataset):
     def collect_samples(
         self,
         num_samples: int = 10000,
+        keys: Collection[str] | None = None,
     ) -> dict[str, dict[str, torch.Tensor]]:
         """
         Subsamples trajectory windows into uniform (N_windows, T_window, ...) PyTorch tensors.
         Preserves exact sequence dimensions for Transforms while retaining masks for scaler fitting.
+        `keys` limits the collected entries to those keys, None collects all of them.
         """
         total_samples = len(self)
         indices = (
@@ -218,7 +227,7 @@ class TrajectoryDataset(Dataset):
 
                 elif isinstance(ctx_dict, dict):
                     for k, v in ctx_dict.items():
-                        if not torch.is_tensor(v):
+                        if not torch.is_tensor(v) or (keys is not None and k not in keys):
                             continue
                         accumulators[ctx][k].append(v.detach().cpu())
 
@@ -296,6 +305,7 @@ class TrajectoryDataset(Dataset):
         return self.anchor_key if self.anchor_key is not None else list(raw_dict.keys())[0]
 
     def _ingest_data(self, data: Any):
+        # If dat is not a dict structre, create a n internal dict representation.
         raw_dict = data if isinstance(data, dict) else {"_internal": data}
         if not raw_dict:
             raise ValueError("TrajectoryDataset received no data.")
@@ -362,6 +372,40 @@ class TrajectoryDataset(Dataset):
             sample_to_local_t, dtype=torch.long, device=self._device
         )
 
+        # Per goal: episode lengths and where each episode starts in the flattened frames, read
+        # off its first source
+        self._goal_index = {}
+        for sampler in self.goals.values():
+            source = sampler.sources[0]
+            if source in self.data and source not in self._goal_index:
+                lengths = torch.tensor([ep.shape[0] for ep in self.data[source]])
+                self._goal_index[source] = (lengths, torch.cumsum(lengths, 0) - lengths)
+
+    def _check_goals(self) -> None:
+        seen: set[str] = set()
+        for name, sampler in self.goals.items():
+            for source in sampler.sources:
+                if source not in self.data:
+                    raise KeyError(
+                        f"goal {name!r} reads {source!r}, which is not in the data "
+                        f"({sorted(self.data)}) - was it dropped by a filter?"
+                    )
+            # One step index has to be valid in every source of the goal
+            lengths = {
+                source: [ep.shape[0] for ep in self.data[source]] for source in sampler.sources
+            }
+            if len({tuple(v) for v in lengths.values()}) > 1:
+                raise ValueError(
+                    f"goal {name!r} reads {sampler.sources}, whose episodes differ in length - "
+                    f"one goal frame needs the same steps in every source"
+                )
+            for key in sampler.output_keys(name):
+                if key in self.data:
+                    raise ValueError(f"goal {key!r} would shadow the stored key of the same name")
+                if key in seen:
+                    raise ValueError(f"two goals both produce {key!r}")
+                seen.add(key)
+
     def split(
         self, percentage: float, generator: torch.Generator | None = None
     ) -> "TrajectoryDataset":
@@ -404,6 +448,7 @@ class TrajectoryDataset(Dataset):
             anchor_key=self.anchor_key,
             pad_left_fn=self.pad_left_fn,
             pad_right_fn=self.pad_right_fn,
+            goals=self.goals,
             on_demand_device_load=self._on_demand_device_load,
             return_tuple=self._return_tuple,
             device=self._device,
