@@ -35,12 +35,12 @@ def apply_around_dim(
 
 def sum_around(x: torch.Tensor, dims: int | tuple[int], *, keepdim: bool = False) -> torch.Tensor:
 
-    return apply_around_dim(torch.sum, x, dims, keepdim)
+    return apply_around_dim(torch.sum, x, dims, keepdim=keepdim)
 
 
 def mean_around(x: torch.Tensor, dims: int | tuple[int], *, keepdim: bool = False) -> torch.Tensor:
 
-    return apply_around_dim(torch.mean, x, dims, keepdim)
+    return apply_around_dim(torch.mean, x, dims, keepdim=keepdim)
 
 
 def approx_cumulative_normal_function(x: torch.Tensor) -> torch.Tensor:

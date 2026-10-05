@@ -37,8 +37,8 @@ def test_list_initialization_and_shapes(list_dataset):
 
     data_seq, target_seq = sample["data"], sample["targets"]
 
-    assert data_seq["seq"].shape[0] == 2, "History length mismatch"
-    assert target_seq["seq"].shape[0] == 16, "Horizon length mismatch"
+    assert data_seq["_internal"].shape[0] == 2, "History length mismatch"
+    assert target_seq["_internal"].shape[0] == 16, "Horizon length mismatch"
 
 
 def test_dict_initialization_and_shapes(dict_dataset):
@@ -78,11 +78,11 @@ def test_episode_boundary_isolation():
     sample = dataset[19]
 
     # The history loop can look back into its own episode
-    assert torch.all(sample["data"]["seq"] == 1.0)
+    assert torch.all(sample["data"]["_internal"] == 1.0)
 
     # The horizon reaches forward past index 19. Steps 20+ do not exist in Ep 0,
     # so it MUST pad using index 19's value (1.0), NOT bleed into Ep 1 (2.0).
-    assert torch.all(sample["targets"]["seq"] == 1.0), "Horizon leaked into the next episode!"
+    assert torch.all(sample["targets"]["_internal"] == 1.0), "Horizon leaked into the next episode!"
 
 @pytest.mark.parametrize(
     "align_start, expected_horizon_start_val",
@@ -101,10 +101,10 @@ def test_temporal_alignment_modes(align_start, expected_horizon_start_val):
     sample = dataset[5]
 
     # Invariant: History sequence always terminates at the requested sample index
-    assert sample["data"]["seq"][-1].item() == 5.0
+    assert sample["data"]["_internal"][-1].item() == 5.0
 
     # Invariant: Verify anchor shifts match specification layout matches exactly
-    actual_horizon_start = sample["targets"]["seq"][0].item()
+    actual_horizon_start = sample["targets"]["_internal"][0].item()
     assert actual_horizon_start == expected_horizon_start_val, (
         f"Alignment mismatch! Expected horizon to start at {expected_horizon_start_val}, "
         f"but got {actual_horizon_start} using align_start={align_start}"
@@ -116,7 +116,7 @@ def test_right_edge_padding(list_dataset):
     last_idx = len(list_dataset) - 1
     sample = list_dataset[last_idx]
 
-    horizon_seq = sample["targets"]["seq"]
+    horizon_seq = sample["targets"]["_internal"]
 
     # Ensure it didn't crash and filled out the whole requested horizon
     assert horizon_seq.shape[0] == list_dataset.horizon
