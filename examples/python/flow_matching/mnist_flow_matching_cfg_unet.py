@@ -6,6 +6,7 @@ import numpy as np
 import torch
 
 import butane
+import mosi
 
 
 @torch.no_grad()
@@ -14,7 +15,7 @@ def eval_model(
     condition: torch.Tensor,
     fm: butane.nn.FlowMatching,
     ema: torch.nn.Module | None = None,
-    logger: butane.logger.ModelLogger | None = None,
+    logger: mosi.Sitter | None = None,
 ):
     model_mode = model.training
     model.eval()
@@ -105,7 +106,7 @@ if __name__ == "__main__":
     )
     optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
     ema = butane.nn.EMA(model=model, decay=0.9999)
-    logger = butane.logger.ModelLogger(".tmp/mnist_fm_cfg", overwrite=True, eval_mode=args.eval_only)
+    logger = mosi.Sitter(".tmp/mnist_fm_cfg", overwrite=True, eval_mode=args.eval_only)
 
     if not args.eval_only:
         training_steps = 10000

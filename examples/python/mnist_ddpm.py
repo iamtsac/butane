@@ -3,9 +3,10 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 import butane
+import mosi
 
 @torch.no_grad()
-def eval_model(model, diffusion, fpath=None):
+def eval_model(model, diffusion, logger=None):
     x_T = torch.randn((10, 1, 28, 28))
     generations = diffusion.sample(
         x_T=x_T,
@@ -15,11 +16,11 @@ def eval_model(model, diffusion, fpath=None):
     for i in range(generations.size(0)):
         fig, ax = plt.subplots()
         ax.imshow(generations[i])
-        if fpath is None:
+        if logger is None:
             plt.show()
         else:
-            plt.savefig(f"{fpath}/img_{i}.png")
-            plt.close()
+            logger.add_image(f"img_{i}.png", fig)
+            plt.close(fig)
 
 
 if __name__ == "__main__":
@@ -49,7 +50,7 @@ if __name__ == "__main__":
     ema = butane.nn.EMA(model=model, decay=0.9999)
 
     epochs = 2000
-    logger = butane.logger.ModelLogger(".tmp/mnist_ddpm", overwrite=True)
+    logger = mosi.Sitter(".tmp/mnist_ddpm", overwrite=True)
     for epoch in range(epochs):
         sum_loss = 0
         sum_grad_norm = 0
@@ -71,12 +72,14 @@ if __name__ == "__main__":
             ema.update()
             sum_loss += loss.item()
         if ((epoch + 1) % 50) == 0:
-            logger.checkpoint(epoch + 1, model=model, ema=ema, optimizer=optimizer)
+            logger.checkpoint(model=model, ema=ema, optimizer=optimizer)
             ema.enable()
             model.eval()
-            eval_model(model, diffusion, logger.output_path)
+            eval_model(model, diffusion, logger)
             ema.disable()
             model.train()
+        logger.add_stats(loss=sum_loss / len(dl), grad_norm=sum_grad_norm / len(dl))
+        logger.step()
         print(f"Epochs {epoch + 1} -> Loss: {sum_loss/len(dl)} Grad Norm: {sum_grad_norm / len(dl)}")
 
     ema.enable()

@@ -3,7 +3,6 @@ from butane import (
     data as data,
     clustering as clustering,
     math as math,
-    logger as logger,
     optim as optim
 )
 

@@ -3,6 +3,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 import butane
+import mosi
 
 if __name__ == "__main__":
     dev = torch.device("cuda")
@@ -29,7 +30,7 @@ if __name__ == "__main__":
     ).to(dev)
 
     # Load a pretrained model
-    model.load_state_dict(torch.load(".tmp/mnist_ddpm/checkpoint_1000/model.pt"))
+    mosi.Sitter(".tmp/mnist_ddpm", eval_mode=True).load_checkpoint(1000, model=model)
 
     x_orig = ds.data[:30]
     M = torch.ones_like(x_orig)

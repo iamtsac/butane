@@ -8,8 +8,6 @@ authors = [
 # Pip reads these natively. Pixi imports these as standard PyPI requirements.
 dependencies = [
     "scipy",
-    "wandb>=0.26.1",
-    "imageio>=2.37.0,<3",
     "torch>=2.11.0,<3",
     "torchvision>=0.26.0"
 ]
@@ -39,6 +37,9 @@ test = [
 examples = [
     "matplotlib"
 ]
+
+[tool.pixi.feature.examples.pypi-dependencies]
+model-sitter = { git = "https://github.com/iamtsac/model-sitter.git", extras = ["wandb", "media"] }
 
 [tool.pixi.environments]
 default = { features = [], solve-group = "default" }
